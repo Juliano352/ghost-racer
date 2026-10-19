@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ghost Racer</title>
+    <link rel="stylesheet" href="./src/style.css" />
+  </head>
+  <body>
+    <canvas id="game"></canvas>
+    <div id="hud"></div>
+    <div id="banner"></div>
+    <aside id="debug">
+      <h2>Netcode</h2>
+      <pre id="stats"></pre>
+      <label><input type="checkbox" id="opt-predict" checked /> Client prediction</label>
+      <label><input type="checkbox" id="opt-server" /> Show server position</label>
+      <label><input type="checkbox" id="opt-auto" /> Autopilot (P)</label>
+      <label class="slider">Added RTT <span id="lat-val">0 ms</span><input type="range" id="opt-lat" min="0" max="400" step="10" value="0" /></label>
+      <label class="slider">Jitter <span id="jit-val">0 ms</span><input type="range" id="opt-jit" min="0" max="100" step="5" value="0" /></label>
+    </aside>
+    <footer id="help">W / ↑ throttle · S / ↓ brake · A D / ← → steer · Space handbrake · P autopilot</footer>
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>
