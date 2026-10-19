@@ -23,6 +23,7 @@ export interface Snap {
   phaseEnd: number;
   raceStart: number;
   raceId: number;
+  collisions: boolean; // false = ghost mode
   you: number;
   role: 'player' | 'spectator';
   ack: number; // last input seq of yours the server has applied

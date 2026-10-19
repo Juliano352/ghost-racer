@@ -42,6 +42,59 @@ export function stepCar(c: CarPhys, inp: Controls, dt = DT): void {
   collideWalls(c);
 }
 
+// Each car's body is two circles (front and rear) — a cheap fit for a 34x18 rectangle.
+const BODY_R = CAR.width / 2;
+const BODY_OFF = CAR.length / 2 - BODY_R;
+
+function bodyCircles(c: CarPhys): [number, number][] {
+  const ox = Math.cos(c.a) * BODY_OFF, oy = Math.sin(c.a) * BODY_OFF;
+  return [[c.x + ox, c.y + oy], [c.x - ox, c.y - oy]];
+}
+
+/** Smallest distance between the two cars' body circles minus contact distance (<0 = overlapping). */
+export function carGap(a: CarPhys, b: CarPhys): number {
+  let min = Infinity;
+  for (const [px, py] of bodyCircles(a)) {
+    for (const [qx, qy] of bodyCircles(b)) min = Math.min(min, Math.hypot(qx - px, qy - py));
+  }
+  return min - 2 * BODY_R;
+}
+
+/**
+ * Pushes overlapping cars apart (half each) and exchanges momentum along the contact normal.
+ * Equal mass. Returns true on contact. The client calls this on a throwaway copy of the
+ * opponent to predict bumps; the server's call is the one that counts.
+ */
+export function collideCars(a: CarPhys, b: CarPhys): boolean {
+  const cx = b.x - a.x, cy = b.y - a.y;
+  if (cx * cx + cy * cy > (CAR.length + 2) * (CAR.length + 2)) return false;
+  let pen = 0, nx = 0, ny = 0;
+  for (const [px, py] of bodyCircles(a)) {
+    for (const [qx, qy] of bodyCircles(b)) {
+      const dx = qx - px, dy = qy - py;
+      const d = Math.hypot(dx, dy);
+      const p = 2 * BODY_R - d;
+      if (p > pen) {
+        pen = p;
+        if (d > 1e-9) { nx = dx / d; ny = dy / d; }
+        else { nx = 1; ny = 0; }
+      }
+    }
+  }
+  if (pen <= 0) return false;
+  a.x -= (nx * pen) / 2; a.y -= (ny * pen) / 2;
+  b.x += (nx * pen) / 2; b.y += (ny * pen) / 2;
+  const closing = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
+  if (closing < 0) {
+    const j = (-(1 + CAR.carBounce) * closing) / 2;
+    a.vx -= j * nx; a.vy -= j * ny;
+    b.vx += j * nx; b.vy += j * ny;
+  }
+  collideWalls(a);
+  collideWalls(b);
+  return true;
+}
+
 export function collideWalls(c: CarPhys): void {
   const n = nearestOnTrack(c.x, c.y);
   const limit = HALF_WIDTH - CAR.radius;

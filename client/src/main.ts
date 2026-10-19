@@ -1,7 +1,7 @@
 // Client: predicts its own car, interpolates everything else, renders, and shows netcode stats.
 import { autopilot } from '../../shared/autopilot.ts';
-import { DT, INTERP_DELAY_TICKS, LAPS, TICK_RATE } from '../../shared/constants.ts';
-import { stepCar, type CarPhys, type Controls } from '../../shared/physics.ts';
+import { DT, INTERP_DELAY_TICKS, LAPS, MAX_EXTRAPOLATE_STEPS, TICK_RATE } from '../../shared/constants.ts';
+import { collideCars, stepCar, type CarPhys, type Controls } from '../../shared/physics.ts';
 import type { CarSnap, InputMsg, ServerMsg, Snap } from '../../shared/protocol.ts';
 import { SEG_COUNT } from '../../shared/track.ts';
 import { Net } from './net.ts';
@@ -31,8 +31,9 @@ let predRaceId = -1;
 let pending: InputMsg[] = []; // sent but not yet acknowledged by the server
 let seq = 0;
 const offset = { x: 0, y: 0, a: 0 }; // visual smoothing of corrections, decays to 0
+const oppOffset = { x: 0, y: 0 }; // same, for the extrapolated opponent
 
-const stats = { rtt: 0, corrections: 0, lastErr: 0, maxErr: 0 };
+const stats = { rtt: 0, corrections: 0, lastErr: 0, maxErr: 0, contacts: 0 };
 const opts = { predict: true, showServer: false, autopilot: false };
 
 const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -41,6 +42,21 @@ setInterval(() => net.send({ t: 'ping', c: performance.now() }), 1000);
 
 const toPhys = (c: CarSnap | CarPhys): CarPhys => ({ x: c.x, y: c.y, vx: c.vx, vy: c.vy, a: c.a });
 const wrapAngle = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
+
+/**
+ * With collisions on, where the opponent will be when the server applies our input `k` steps
+ * past snapshot `s`: their last known state pushed forward along their velocity (dead reckoning).
+ * Our predicted car is k steps ahead of `s` too, so both live in the same moment — that's what we
+ * collide against and draw. Returns a fresh object, so collideCars can't change real state.
+ */
+function opponentAt(s: Snap, k: number): (CarPhys & { id: number }) | null {
+  if (!s.collisions || s.role !== 'player') return null;
+  const me = s.cars.find((c) => c.id === myId);
+  const o = s.cars.find((c) => c.id !== myId);
+  if (!me || !o || me.finish !== null || o.finish !== null) return null;
+  const t = Math.min(Math.max(k, 0), MAX_EXTRAPOLATE_STEPS) * DT;
+  return { id: o.id, x: o.x + o.vx * t, y: o.y + o.vy * t, vx: o.vx, vy: o.vy, a: o.a };
+}
 
 function onMessage(m: ServerMsg): void {
   if (m.t === 'welcome') {
@@ -58,6 +74,7 @@ function onMessage(m: ServerMsg): void {
 }
 
 function onSnap(s: Snap): void {
+  const oldOpp = latest && predicted ? opponentAt(latest, pending.length) : null;
   if (latest && s.raceId !== latest.raceId) snaps.length = 0; // cars teleported to the grid; don't blend across
   snaps.push(s);
   if (snaps.length > 60) snaps.shift();
@@ -85,7 +102,11 @@ function onSnap(s: Snap): void {
   const before = predicted;
   const p = toPhys(me);
   pending = pending.filter((i) => i.seq > s.ack);
-  for (const i of pending) stepCar(p, i);
+  pending.forEach((i, idx) => {
+    stepCar(p, i);
+    const o = opponentAt(s, idx + 1);
+    if (o) collideCars(p, o);
+  });
   const dx = before.x - p.x, dy = before.y - p.y;
   const err = Math.hypot(dx, dy);
   stats.lastErr = err;
@@ -106,6 +127,15 @@ function onSnap(s: Snap): void {
     prevPredicted.a -= before.a - p.a;
   }
   predicted = p;
+
+  // Fresh data moves the extrapolated opponent; hide the jump and let it decay like ours.
+  const newOpp = opponentAt(s, pending.length);
+  if (oldOpp && newOpp && oldOpp.id === newOpp.id && Math.hypot(oldOpp.x - newOpp.x, oldOpp.y - newOpp.y) < SNAP_ERR_PX) {
+    oppOffset.x += oldOpp.x - newOpp.x;
+    oppOffset.y += oldOpp.y - newOpp.y;
+  } else {
+    oppOffset.x = oppOffset.y = 0;
+  }
 }
 
 // --- input
@@ -139,6 +169,8 @@ function fixedStep(): void {
   if (pending.length > 600) pending.shift();
   prevPredicted = toPhys(predicted);
   stepCar(predicted, c);
+  const o = opponentAt(latest, pending.length);
+  if (o && collideCars(predicted, o)) stats.contacts++;
 }
 
 // --- interpolation of server snapshots (remote cars, spectators, and you with prediction off)
@@ -183,11 +215,15 @@ function draw(alpha: number): void {
         color: ORANGE, alpha: 1, label: 'You',
       });
     } else {
-      const p = interp.get(c.id) ?? toPhys(c);
+      // Opponent: drawn where we can hit it (extrapolated) when collisions are on and we predict;
+      // otherwise smoothly interpolated in the past. Ghost-transparent whenever it can't be hit.
+      const ext = !mine && opts.predict && predicted ? opponentAt(s, pending.length - 1 + alpha) : null;
+      const p = ext ? { ...ext, x: ext.x + oppOffset.x, y: ext.y + oppOffset.y } : (interp.get(c.id) ?? toPhys(c));
+      const solid = mine || !isPlayer || (s.collisions && c.finish === null && s.cars.every((x) => x.finish === null));
       cars.push({
         ...p,
         color: mine ? ORANGE : isPlayer ? BLUE : SLOT_COLORS[slot % 2],
-        alpha: !mine && isPlayer ? 0.45 : 1, // the opponent is a ghost
+        alpha: solid ? 1 : 0.45,
         label: mine ? 'You' : c.name,
       });
     }
@@ -221,6 +257,10 @@ function setHud(text: string): void {
 
 function updateHud(): void {
   const s = latest;
+  if (net.kicked) {
+    setHud('');
+    return setBanner('Disconnected by the host<br><span class="sub">Reload the page to rejoin</span>', true);
+  }
   if (!s) {
     setHud('');
     return setBanner(net.connected ? 'Joining…' : 'Connecting…', true);
@@ -263,6 +303,8 @@ function updateStats(): void {
     `Phase        ${s ? `${s.phase} (${s.role})` : '—'}`,
     `Snapshots    ${snaps.length} buffered @ 20 Hz`,
     `Interp delay ${Math.round((INTERP_DELAY_TICKS / TICK_RATE) * 1000)} ms`,
+    `Collisions   ${s ? (s.collisions ? `on · ${stats.contacts} contacts` : 'off (ghost)') : '—'}`,
+    `Opponent     ${s?.collisions && predicted && opts.predict ? `+${Math.round(Math.min(pending.length, MAX_EXTRAPOLATE_STEPS) * DT * 1000)} ms ahead` : 'interpolated'}`,
     `Unacked      ${pending.length} inputs`,
     `Corrections  ${stats.corrections}`,
     `  last/max   ${stats.lastErr.toFixed(2)} / ${stats.maxErr.toFixed(2)} px`,
@@ -315,6 +357,8 @@ function frame(now: number): void {
   offset.x *= k;
   offset.y *= k;
   offset.a *= k;
+  oppOffset.x *= k;
+  oppOffset.y *= k;
   draw(acc / DT);
   updateHud();
   if (now - statsAt > 250) {

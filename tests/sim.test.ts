@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { CAR } from '../shared/constants.ts';
-import { stepCar, type Controls } from '../shared/physics.ts';
+import { carGap, collideCars, stepCar, type Controls } from '../shared/physics.ts';
 import { spawnCar, updateProgress } from '../shared/race.ts';
 import { HALF_WIDTH, TRACK_LENGTH, nearestOnTrack, pointAlong } from '../shared/track.ts';
 
@@ -25,6 +25,17 @@ test('physics is deterministic, including across JSON round-trips (what reconcil
   });
   assert.deepEqual(a, b);
   assert.ok(Math.hypot(a.x - 400, a.y - 128) > 10, 'car actually moved');
+});
+
+test('head-on bump separates the cars, bounces them, and conserves momentum', () => {
+  const a = { x: 600, y: 160, vx: 200, vy: 0, a: 0 };
+  const b = { x: 600 + CAR.length - 6, y: 160, vx: -200, vy: 0, a: Math.PI };
+  assert.ok(carGap(a, b) < 0);
+  assert.equal(collideCars(a, b), true);
+  assert.ok(carGap(a, b) > -1e-9, 'still overlapping');
+  assert.ok(a.vx < 0 && b.vx > 0, 'should bounce apart');
+  assert.ok(Math.abs(a.vx + b.vx) < 1e-9, 'momentum not conserved');
+  assert.ok(Math.abs(a.vx) < 200, 'bounce must lose energy');
 });
 
 test('walls keep the car on the tarmac', () => {

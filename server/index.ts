@@ -13,8 +13,18 @@ const TYPES: Record<string, string> = {
   '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png',
 };
 
+const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+
 const http = createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', 'http://x');
+  // Host-only: free every slot. Close code 4000 tells clients not to auto-reconnect.
+  if (req.method === 'POST' && url.pathname === '/admin/kick') {
+    if (!LOOPBACK.has(req.socket.remoteAddress ?? '')) return void res.writeHead(403).end();
+    const n = wss.clients.size;
+    for (const ws of wss.clients) ws.close(4000, 'Kicked by host');
+    console.log(`Kicked ${n} connection(s)`);
+    return void res.writeHead(200, { 'content-type': 'text/plain' }).end(`kicked ${n}\n`);
+  }
   const file = resolve(join(DIST, url.pathname === '/' ? 'index.html' : url.pathname));
   if (!file.startsWith(DIST + sep)) return void res.writeHead(403).end();
   try {
@@ -25,7 +35,7 @@ const http = createServer(async (req, res) => {
   }
 });
 
-const game = new Game();
+const game = new Game({ collisions: process.env.GHOST !== '1' }); // GHOST=1 → original no-collision mode
 const wss = new WebSocketServer({ server: http, path: '/ws' });
 let nextId = 1;
 
@@ -74,4 +84,5 @@ let acc = 0;
   setTimeout(loop, 2);
 })();
 
-http.listen(PORT, () => console.log(`Ghost Racer server on http://localhost:${PORT} (ws path /ws)`));
+http.listen(PORT, () =>
+  console.log(`Ghost Racer server on http://localhost:${PORT} (ws path /ws), collisions ${game.collisions ? 'ON' : 'OFF (ghost mode)'}`));

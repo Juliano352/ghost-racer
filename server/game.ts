@@ -3,7 +3,7 @@ import {
   COUNTDOWN_TICKS, DNF_TICKS, DT, INPUT_SLACK, LAPS, MAX_INPUTS_PER_TICK,
   MAX_RACE_TICKS, RESULTS_TICKS, SNAPSHOT_EVERY,
 } from '../shared/constants.ts';
-import { stepCar } from '../shared/physics.ts';
+import { collideCars, stepCar } from '../shared/physics.ts';
 import { spawnCar, updateProgress, type CarState } from '../shared/race.ts';
 import type { CarSnap, InputMsg, Phase, Result, ServerMsg } from '../shared/protocol.ts';
 
@@ -21,6 +21,7 @@ interface Racer {
 const MAX_QUEUE = 240;
 
 export class Game {
+  readonly collisions: boolean;
   tick = 0;
   phase: Phase = 'waiting';
   phaseEnd = 0;
@@ -32,6 +33,10 @@ export class Game {
   private acks = new Map<number, number>(); // last applied input seq per connection
   private lastSeq = new Map<number, number>(); // last received seq (rejects replays)
   private firstFinish: number | null = null;
+
+  constructor(opts: { collisions?: boolean } = {}) {
+    this.collisions = opts.collisions ?? true;
+  }
 
   join(conn: Conn): void {
     this.order.push(conn);
@@ -102,12 +107,15 @@ export class Game {
 
   // Each input is exactly one DT of driving, applied in order — the same sequence the client predicted.
   // A car's clock is its own input count, so finish times don't depend on network latency.
+  // Cars catching up on queued inputs step in rounds so collisions are checked after every sub-step.
   private simulate(): void {
     const elapsed = this.tick - this.raceStart;
-    for (const r of this.racers) {
-      if (r.left) continue;
-      const budget = Math.min(MAX_INPUTS_PER_TICK, elapsed + INPUT_SLACK - r.steps);
-      for (let k = 0; k < budget && r.queue.length > 0; k++) {
+    const budgets = this.racers.map((r) =>
+      r.left ? 0 : Math.min(MAX_INPUTS_PER_TICK, elapsed + INPUT_SLACK - r.steps));
+    for (let round = 0; round < MAX_INPUTS_PER_TICK; round++) {
+      let moved = false;
+      this.racers.forEach((r, i) => {
+        if (round >= budgets[i] || r.queue.length === 0) return;
         const inp = r.queue.shift()!;
         stepCar(r.car, inp);
         r.steps++;
@@ -116,8 +124,18 @@ export class Game {
           this.firstFinish ??= this.tick;
         }
         this.acks.set(r.conn.id, inp.seq);
-      }
+        moved = true;
+      });
+      if (!moved) break;
+      this.collide();
     }
+  }
+
+  // Finished cars turn back into ghosts so they can't block anyone still racing.
+  private collide(): void {
+    const [a, b] = this.racers;
+    if (!this.collisions || !a || !b || a.left || b.left || a.finish !== null || b.finish !== null) return;
+    collideCars(a.car, b.car);
   }
 
   private checkEnd(): void {
@@ -157,7 +175,7 @@ export class Game {
     for (const conn of this.order) {
       conn.send({
         t: 'snap', tick: this.tick, phase: this.phase, phaseEnd: this.phaseEnd,
-        raceStart: this.raceStart, raceId: this.raceId, you: conn.id,
+        raceStart: this.raceStart, raceId: this.raceId, collisions: this.collisions, you: conn.id,
         role: ids.has(conn.id) ? 'player' : 'spectator',
         ack: this.acks.get(conn.id) ?? 0, cars, queue, results: this.results,
       });

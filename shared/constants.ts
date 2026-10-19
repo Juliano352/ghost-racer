@@ -34,4 +34,8 @@ export const CAR = {
   width: 18,
   wallBounce: 0.3,
   wallFriction: 0.9,
+  carBounce: 0.4, // restitution between cars (equal mass)
 } as const;
+
+// With collisions on, the client draws/predicts the opponent this many steps ahead at most.
+export const MAX_EXTRAPOLATE_STEPS = 30;

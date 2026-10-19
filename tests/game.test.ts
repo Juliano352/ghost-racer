@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { Game, type Conn } from '../server/game.ts';
 import { autopilot } from '../shared/autopilot.ts';
 import { INPUT_SLACK, MAX_INPUTS_PER_TICK, RESULTS_TICKS } from '../shared/constants.ts';
-import { stepCar, type CarPhys } from '../shared/physics.ts';
+import { carGap, stepCar, type CarPhys } from '../shared/physics.ts';
 import type { ServerMsg, Snap } from '../shared/protocol.ts';
 import { spawnCar } from '../shared/race.ts';
 
@@ -39,14 +39,16 @@ function race(g: Game) {
     for (const r of g.racers) {
       const m = mirrors.get(r.conn.id)!;
       if (g.phase === 'racing') maxErr = Math.max(maxErr, Math.hypot(r.car.x - m.x, r.car.y - m.y));
+      // Zero-latency reconciliation: the client adopts the server's state (bumps make them differ).
+      Object.assign(m, { x: r.car.x, y: r.car.y, vx: r.car.vx, vy: r.car.vy, a: r.car.a });
     }
     return false;
   });
   return maxErr;
 }
 
-test('two connections race to the finish and prediction matches the server exactly', () => {
-  const g = new Game();
+test('ghost mode: two connections race to the finish and prediction matches the server exactly', () => {
+  const g = new Game({ collisions: false });
   const a = client(1), b = client(2);
   g.join(a.conn);
   g.join(b.conn);
@@ -59,6 +61,41 @@ test('two connections race to the finish and prediction matches the server exact
     assert.ok(r.time !== null && r.time > 10 && r.time < 120, `lap time ${r.time}`);
   }
   console.log('race results:', g.results);
+});
+
+test('collisions: cars never end a tick overlapping, and a bumping race still finishes', () => {
+  const g = new Game({ collisions: true });
+  [client(1), client(2)].forEach((x) => g.join(x.conn));
+  stepUntil(g, () => g.phase === 'racing');
+  // Steer car 1 straight into car 2 on the grid.
+  let minGap = Infinity, contacts = 0;
+  for (let s = 1; s <= 90; s++) {
+    g.onInput(1, { t: 'input', seq: s, th: 1, st: s < 20 ? 1 : 0, hb: 0 });
+    g.onInput(2, { t: 'input', seq: s, th: 1, st: 0, hb: 0 });
+    g.step();
+    const gap = carGap(g.racers[0].car, g.racers[1].car);
+    minGap = Math.min(minGap, gap);
+    if (gap < 0.5) contacts++;
+  }
+  assert.ok(contacts > 0, 'the cars should have touched');
+  assert.ok(minGap > -1, `cars overlapped by ${-minGap}px after resolution`);
+
+  const g2 = new Game({ collisions: true });
+  [client(1), client(2)].forEach((x) => g2.join(x.conn));
+  race(g2);
+  assert.equal(g2.phase, 'results');
+  assert.ok(g2.results!.every((r) => r.time !== null), `someone got stuck: ${JSON.stringify(g2.results)}`);
+  console.log('bumping race results:', g2.results);
+});
+
+test('ghost mode: cars pass straight through each other', () => {
+  const g = new Game({ collisions: false });
+  [client(1), client(2)].forEach((x) => g.join(x.conn));
+  stepUntil(g, () => g.phase === 'racing');
+  Object.assign(g.racers[1].car, { x: g.racers[0].car.x + 5, y: g.racers[0].car.y });
+  g.onInput(1, { t: 'input', seq: 1, th: 1, st: 0, hb: 0 });
+  g.step();
+  assert.ok(carGap(g.racers[0].car, g.racers[1].car) < -10);
 });
 
 test('a third connection spectates, then races in the next round', () => {

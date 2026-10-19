@@ -6,6 +6,7 @@ export class Net {
   latencyMs = 0; // added round trip; half applied each way
   jitterMs = 0;
   connected = false;
+  kicked = false;
   private url: string;
   private onMsg: (m: ServerMsg) => void;
   private ws: WebSocket | null = null;
@@ -26,9 +27,10 @@ export class Net {
       const m = JSON.parse(e.data as string) as ServerMsg;
       this.inQ.push(this.delay(), () => this.onMsg(m));
     };
-    ws.onclose = () => {
+    ws.onclose = (e) => {
       this.connected = false;
-      setTimeout(() => this.connect(), 1000);
+      if (e.code === 4000) this.kicked = true; // host freed the slots; stay out until reload
+      else setTimeout(() => this.connect(), 1000);
     };
   }
 
